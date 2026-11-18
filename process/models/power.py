@@ -1030,8 +1030,21 @@ class Power(Model):
         )
 
         #  Number of primary heat exchangers
+        p_primary = self.data.heat_transport.p_plant_primary_heat_mw
+        if not np.isfinite(p_primary):
+            raise ProcessValueError(
+                "Primary thermal power is non-finite "
+                f"(p_plant_primary_heat_mw={p_primary}). "
+                "Check radiation / power balance (often P_rad >> P_fusion)."
+            )
+        if p_primary < 0.0:
+            raise ProcessValueError(
+                "Primary thermal power is negative "
+                f"(p_plant_primary_heat_mw={p_primary}). "
+                "Check radiation / power balance."
+            )
         self.data.heat_transport.n_primary_heat_exchangers = math.ceil(
-            self.data.heat_transport.p_plant_primary_heat_mw / 1000.0e0
+            p_primary / 1000.0e0
         )
 
     def calculate_cryo_loads(self):

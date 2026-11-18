@@ -2850,11 +2850,18 @@ class Costs(Model):
 
         #  Compound interest factor
 
-        fefcdr = (1.0e0 + self.data.costs.discount_rate) ** self.data.costs.cdrlife_cal
-
-        #  Capital recovery factor
-
-        crfcdr = (fefcdr * self.data.costs.discount_rate) / (fefcdr - 1.0e0)
+        #  Guard against a zero current-drive renewal lifetime (e.g. aneutronic
+        #  concepts where the blanket lifetime evaluates to zero): there is no
+        #  renewal cost in that case.
+        if self.data.costs.cdrlife_cal > 0.0:
+            fefcdr = (1.0e0 + self.data.costs.discount_rate) ** (
+                self.data.costs.cdrlife_cal
+            )
+            #  Capital recovery factor
+            crfcdr = (fefcdr * self.data.costs.discount_rate) / (fefcdr - 1.0e0)
+        else:
+            fefcdr = 1.0e0
+            crfcdr = 0.0e0
 
         #  Annual cost of replacements
 

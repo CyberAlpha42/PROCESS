@@ -1,5 +1,6 @@
 """Module containing divertor routines"""
 
+import logging
 import math
 
 import numpy as np
@@ -10,6 +11,8 @@ from process.core.exceptions import ProcessValueError
 from process.core.model import Model
 from process.data_structure.divertor_variables import DivertorHeatLoadModel
 from process.data_structure.physics_variables import DivertorNumberModels
+
+logger = logging.getLogger(__name__)
 
 
 class Divertor(Model):
@@ -324,6 +327,34 @@ class Divertor(Model):
         float
             divertor heat load for a tight aspect ratio machine
         """
+        # Eich / Scarabosio scalings use P_sep (and n_sep) to negative powers.
+        if (
+            (not np.isfinite(p_plasma_separatrix_mw))
+            or p_plasma_separatrix_mw <= 0.0
+            or (not np.isfinite(nd_plasma_separatrix_electron))
+            or nd_plasma_separatrix_electron <= 0.0
+        ):
+            logger.warning(
+                "Divertor Wade model skipped: p_sep=%s n_sep=%s "
+                "(need both > 0). Heat load set to 0.",
+                p_plasma_separatrix_mw,
+                nd_plasma_separatrix_electron,
+            )
+            self.data.divertor.pflux_div_heat_load_mw = 0.0
+            if output:
+                po.osubhd(self.outfile, "Divertor Heat Load")
+                po.ocmmnt(
+                    self.outfile,
+                    "Skipped: P_sep or n_sep <= 0 (no power to divertor).",
+                )
+                po.ovarre(
+                    self.outfile,
+                    "Divertor heat load (MW/m²)",
+                    "(pflux_div_heat_load_mw)",
+                    self.data.divertor.pflux_div_heat_load_mw,
+                )
+            return 0.0
+
         # Radius on midplane
         r_omp = rmajor + rminor
 

@@ -21,6 +21,23 @@ class ScrapeOffLayer(Model):
 
     def run(self):
         """Calculate the scrape off layer physics and update the physics variables."""
+        p_sep = self.data.physics.p_plasma_separatrix_mw
+        # Eich / MAST scalings use P_sep to a negative power; P_sep<=0 must not crash.
+        if (not np.isfinite(p_sep)) or p_sep <= 0.0:
+            logger.warning(
+                "p_plasma_separatrix_mw=%s <= 0; SOL power-decay lengths set to 0",
+                p_sep,
+            )
+            self.data.physics.len_plasma_sol_eich13_power_decay = 0.0
+            self.data.physics.len_plasma_sol_mast14_power_decay_1 = 0.0
+            self.data.physics.len_plasma_sol_mast14_power_decay_2 = 0.0
+            self.data.physics.len_sol_outboard_power_decay = 0.0
+            self.data.physics.a_plasma_outboard_sol_parallel = 0.0
+            self.data.physics.a_plasma_outboard_sol_eich13_parallel = 0.0
+            self.data.physics.pflux_plasma_outboard_sol_parallel_mw = 0.0
+            self.data.physics.pflux_plasma_outboard_sol_eich13_parallel_mw = 0.0
+            return
+
         self.data.physics.len_plasma_sol_eich13_power_decay = self.calculate_eich2013_sol_power_decay_length(  # noqa: E501
             p_plasma_separatrix_mw=self.data.physics.p_plasma_separatrix_mw,
             rmajor=self.data.physics.rmajor,
