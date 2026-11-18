@@ -349,21 +349,84 @@ def check_process(inputs, data):  # noqa: ARG001
             "Constraint 63 is requested without the correct vacuum model (simple)"
         )
 
-    #  Fuel ion fractions must add up to 1.0
-    if (
-        abs(
-            1.0
-            - data.physics.f_plasma_fuel_deuterium
-            - data.physics.f_plasma_fuel_tritium
-            - data.physics.f_plasma_fuel_helium3
-        )
-        > 1e-6
-    ):
+    # Fuel ion fractions must add up to 1.0 (5 species: D + T + ³He + p + ¹¹B)
+    fuel_fraction_sum = (
+        data.physics.f_plasma_fuel_deuterium
+        + data.physics.f_plasma_fuel_tritium
+        + data.physics.f_plasma_fuel_helium3
+        + data.physics.f_plasma_fuel_protium
+        + data.physics.f_plasma_fuel_boron11
+    )
+    if abs(1.0 - fuel_fraction_sum) > 1e-6:
         raise ProcessValidationError(
-            "Fuel ion fractions do not sum to 1.0",
+            "Fuel ion fractions do not sum to 1.0 "
+            "(f_D + f_T + f_He3 + f_p + f_B must equal 1)",
             f_plasma_fuel_deuterium=data.physics.f_plasma_fuel_deuterium,
             f_plasma_fuel_tritium=data.physics.f_plasma_fuel_tritium,
             f_plasma_fuel_helium3=data.physics.f_plasma_fuel_helium3,
+            f_plasma_fuel_protium=data.physics.f_plasma_fuel_protium,
+            f_plasma_fuel_boron11=data.physics.f_plasma_fuel_boron11,
+        )
+
+    # p/B fuel fractions vs legacy n_e-relative seeding: mutually exclusive
+    use_pb_fuel_fractions = (
+        data.physics.f_plasma_fuel_protium > 0.0
+        or data.physics.f_plasma_fuel_boron11 > 0.0
+    )
+    use_pb_legacy_ne_fractions = (
+        data.physics.f_nd_protium_electrons > 0.0
+        or data.physics.f_nd_boron11_electrons > 0.0
+    )
+    if use_pb_fuel_fractions and use_pb_legacy_ne_fractions:
+        raise ProcessValidationError(
+            "p/B specified both as fuel (f_plasma_fuel_protium / "
+            "f_plasma_fuel_boron11) and as ash/impurity (f_nd_protium_electrons / "
+            "f_nd_boron11_electrons); choose one path",
+            f_plasma_fuel_protium=data.physics.f_plasma_fuel_protium,
+            f_plasma_fuel_boron11=data.physics.f_plasma_fuel_boron11,
+            f_nd_protium_electrons=data.physics.f_nd_protium_electrons,
+            f_nd_boron11_electrons=data.physics.f_nd_boron11_electrons,
+        )
+
+    # Composition pre-check: charge available for fuel ions must be positive.
+    # Uses nuclear Z for Z>2 impurities (upper bound on charge sink).
+    impurity_nuclear_z = (1, 2, 4, 6, 7, 8, 10, 14, 18, 26, 28, 36, 54, 74)
+    znimp_frac = 0.0
+    for imp in range(N_IMPURITIES):
+        if impurity_nuclear_z[imp] > 2:
+            znimp_frac += (
+                impurity_nuclear_z[imp]
+                * data.impurity_radiation.f_nd_impurity_electrons[imp]
+            )
+    f_protium_nonfuel = (
+        0.0
+        if use_pb_fuel_fractions
+        else data.physics.f_nd_protium_electrons
+    )
+    f_boron_nonfuel = (
+        0.0
+        if use_pb_fuel_fractions
+        else data.physics.f_nd_boron11_electrons
+    )
+    q_avail_frac = (
+        1.0
+        - 2.0 * data.physics.f_nd_alpha_thermal_electron
+        - f_protium_nonfuel
+        - data.physics.f_nd_beam_electron
+        - 5.0 * f_boron_nonfuel
+        - znimp_frac
+    )
+    if q_avail_frac <= 0.0:
+        raise ProcessValidationError(
+            "Insufficient electron charge for fuel ions after alphas, beams, "
+            "non-fuel p/B and Z>2 impurities (q_avail/n_e <= 0). Reduce ash, "
+            "impurity, beam or legacy p/B fractions, or lower f_nd_alpha_thermal_electron.",
+            q_avail_over_ne=q_avail_frac,
+            f_nd_alpha_thermal_electron=data.physics.f_nd_alpha_thermal_electron,
+            f_nd_beam_electron=data.physics.f_nd_beam_electron,
+            f_nd_protium_electrons=data.physics.f_nd_protium_electrons,
+            f_nd_boron11_electrons=data.physics.f_nd_boron11_electrons,
+            znimp_over_ne=znimp_frac,
         )
 
     if data.physics.f_plasma_fuel_tritium < 1.0e-3:  # tritium fraction is negligible

@@ -10,6 +10,18 @@ from process.core import constants
 from process.core.model import DataStructure
 from process.data_structure.physics_variables import PhysicsData
 from process.models.physics.plasma_profiles import PlasmaProfile
+from process.models.physics.p11b_cross_sections import (
+    P11B_GAMOW_ENERGY_MEV,
+    P11B_REDUCED_MASS_MEV,
+    get_p11b_cross_section_model,
+)
+from process.models.physics.reactivity import (
+    as_reactivity_model,
+    interpolate_reactivity_loglog,
+    maxwellian_reactivity,
+    profile_reactivity_integrand,
+    tabulate_reactivity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +139,9 @@ class FusionReactionRate:
         self.alpha_rate_density = 0.0
         self.proton_rate_density = 0.0
         self.f_dd_branching_trit = 0.0
+        self.p11b_power_density = 0.0
+        self.p11b_rate_density = 0.0
+        self.p11b_alpha_rate_density = 0.0
 
     def deuterium_branching(self, ion_temperature: float) -> float:
         """Calculate the relative rate of tritium producing D-D reactions to 3He ones
@@ -180,6 +195,20 @@ class FusionReactionRate:
 
 
         """
+        # Skip when either fuel fraction is zero. Bosch-Hale can return NaN at
+        # extreme Ti (outside the fit range); IEEE NaN*0 is still NaN and would
+        # pollute neutron / total fusion power even for pure p-11B.
+        if (
+            self.data.physics.f_plasma_fuel_deuterium <= 0.0
+            or self.data.physics.f_plasma_fuel_tritium <= 0.0
+        ):
+            self.sigmav_dt_average = 0.0
+            self.dt_power_density = 0.0
+            self.data.physics.fusrat_plasma_dt_profile = np.zeros_like(
+                self.plasma_profile.neprofile.profile_y
+            )
+            return
+
         # Initialize Bosch-Hale constants for the D-T reaction
         dt = BoschHaleConstants(**REACTION_CONSTANTS_DT)
 
@@ -282,6 +311,16 @@ class FusionReactionRate:
 
 
         """
+        if (
+            self.data.physics.f_plasma_fuel_deuterium <= 0.0
+            or self.data.physics.f_plasma_fuel_helium3 <= 0.0
+        ):
+            self.dhe3_power_density = 0.0
+            self.data.physics.fusrat_plasma_dhe3_profile = np.zeros_like(
+                self.plasma_profile.neprofile.profile_y
+            )
+            return
+
         # Initialize Bosch-Hale constants for the D-3He reaction
         dhe3 = BoschHaleConstants(**REACTION_CONSTANTS_DHE3)
 
@@ -381,6 +420,12 @@ class FusionReactionRate:
 
 
         """
+        if self.data.physics.f_plasma_fuel_deuterium <= 0.0:
+            self.data.physics.fusrat_plasma_dd_helion_profile = np.zeros_like(
+                self.plasma_profile.neprofile.profile_y
+            )
+            return
+
         # Initialize Bosch-Hale constants for the D-D reaction
         dd1 = BoschHaleConstants(**REACTION_CONSTANTS_DD1)
 
@@ -485,6 +530,12 @@ class FusionReactionRate:
 
 
         """
+        if self.data.physics.f_plasma_fuel_deuterium <= 0.0:
+            self.data.physics.fusrat_plasma_dd_triton_profile = np.zeros_like(
+                self.plasma_profile.neprofile.profile_y
+            )
+            return
+
         # Initialize Bosch-Hale constants for the D-D reaction
         dd2 = BoschHaleConstants(**REACTION_CONSTANTS_DD2)
 
@@ -564,6 +615,108 @@ class FusionReactionRate:
             proton_rate_density,
         )
 
+    def p11b_reaction(self):
+        """p + 11B --> 3 alpha reaction.
+
+        Calculates the p-11B fusion power density using the Maxwellian reactivity
+        from :func:`p11b_reactivity` and the volume-averaged proton and boron-11
+        densities. The density profile shape is taken to be the same as the
+        electron density profile, consistent with the treatment of the other
+        fusion reactions in this class.
+
+        All of the reaction energy (8.683 MeV) is carried by three alpha
+        particles. The power is therefore added to the alpha particle fusion
+        power, and three alpha particles are added to the alpha production rate
+        per reaction. No neutron power is produced.
+
+        Notes
+        -----
+        - Boron-11 is specified through ``f_nd_boron11_electrons`` and protons
+          through ``f_nd_protium_electrons`` (both relative to the electron
+          density); they are not part of the D/T/3He fuel fractions.
+        - The p-11B alpha production rate feeds ``fusden_plasma_alpha`` and hence
+          ``fusden_alpha_total`` (used for the alpha confinement time). The
+          thermal alpha ash density is still an input (``f_nd_alpha_thermal_electron``)
+          and is not solved from the p-11B production rate.
+        - The alpha energy split between ions and electrons and the
+          ``f_p_alpha_plasma_deposited`` factor are applied to the combined alpha
+          power, as for D-T alphas.
+        """
+        n_proton = self.data.physics.nd_plasma_protons_vol_avg
+        n_boron = self.data.physics.nd_plasma_boron11_vol_avg
+
+        # Nothing to do if either reactant is absent (default for D-T cases)
+        if n_proton <= 0.0 or n_boron <= 0.0:
+            return
+
+        # Ion temperature profile, same convention as the Bosch-Hale reactions
+        ion_temperature_profile = (
+            self.data.physics.temp_plasma_ion_vol_avg_kev
+            / self.data.physics.temp_plasma_electron_vol_avg_kev
+        ) * self.plasma_profile.teprofile.profile_y
+
+        # Normalised density profile (shape only, volume average removed)
+        density_profile_normalised = (
+            1.0 / self.data.physics.nd_plasma_electrons_vol_avg
+        ) * self.plasma_profile.neprofile.profile_y
+
+        # Volume-averaged <sigma v>: Maxwellian σ×f table for the selected
+        # cross-section model (i_p11b_xsec_model), same 2ρ (n/⟨n⟩)² weight as
+        # fusion_rate_integral (Bosch–Hale path).
+        model_id = int(self.data.physics.i_p11b_xsec_model)
+
+        def _reactivity(t_kev):
+            return p11b_reactivity(t_kev, model=model_id)
+
+        sigmav = integrate.simpson(
+            profile_reactivity_integrand(
+                self.plasma_profile.teprofile.profile_x,
+                ion_temperature_profile,
+                density_profile_normalised,
+                as_reactivity_model(_reactivity),
+            ),
+            x=self.plasma_profile.neprofile.profile_x,
+            dx=self.plasma_profile.neprofile.profile_dx,
+        )
+
+        # Reaction energy [MJ]
+        reaction_energy = constants.P_B11_ENERGY / 1.0e6
+
+        # Fusion power density [MW/m^3]
+        fusion_power_density = sigmav * n_proton * n_boron * reaction_energy
+
+        # Power densities for the different products [MW/m^3].
+        # Same structure as dt_reaction(), but with no neutron branch:
+        # all of the energy is carried by the three alphas.
+        alpha_power_density = (
+            constants.P_B11_ALPHA_ENERGY_FRACTION * fusion_power_density
+        )
+        pden_non_alpha_charged_mw = 0.0
+        neutron_power_density = (
+            constants.P_B11_NEUTRON_ENERGY_FRACTION * fusion_power_density
+        )
+
+        # Reaction rate density [reactions/m^3/s]
+        fusion_rate_density = fusion_power_density / reaction_energy
+
+        # Alpha production rate density [alphas/m^3/s].
+        # Three alphas per reaction, each carrying P_B11_ALPHA_ENERGY (~2.894 MeV).
+        alpha_rate_density = constants.P_B11_ALPHA_COUNT * fusion_rate_density
+
+        self.p11b_power_density = fusion_power_density
+        self.p11b_rate_density = fusion_rate_density
+        self.p11b_alpha_rate_density = alpha_rate_density
+
+        # Sum the fusion rates for all particles
+        self.sum_fusion_rates(
+            alpha_power_density,
+            pden_non_alpha_charged_mw,
+            neutron_power_density,
+            fusion_rate_density,
+            alpha_rate_density,
+            0.0,
+        )
+
     def sum_fusion_rates(
         self,
         alpha_power_add: float,
@@ -623,6 +776,7 @@ class FusionReactionRate:
         self.dhe3_reaction()
         self.dd_helion_reaction()
         self.dd_triton_reaction()
+        self.p11b_reaction()
 
     def set_physics_variables(self):
         """Set the required physics variables in the physics_variables and
@@ -644,6 +798,9 @@ class FusionReactionRate:
         self.data.physics.dhe3_power_density = self.dhe3_power_density
         self.data.physics.dd_power_density = self.dd_power_density
         self.data.physics.f_dd_branching_trit = self.f_dd_branching_trit
+        self.data.physics.pden_plasma_p11b_mw = self.p11b_power_density
+        self.data.physics.fusden_plasma_p11b = self.p11b_rate_density
+        self.data.physics.fusden_plasma_p11b_alpha = self.p11b_alpha_rate_density
 
 
 @dataclass
@@ -669,6 +826,12 @@ def fusion_rate_integral(
     physics_data: PhysicsData,
 ) -> np.ndarray:
     """Evaluate the integrand for the fusion power integration.
+
+    Uses the Bosch–Hale closed-form ⟨σv⟩(T) backend. For reactions that need
+    an explicit Maxwellian σ(E) average (e.g. p–¹¹B), call
+    :func:`profile_reactivity_integrand` with a :class:`~process.models.physics.reactivity.ReactivityModel`
+    built from :func:`~process.models.physics.reactivity.maxwellian_reactivity`
+    instead.
 
     Parameters
     ----------
@@ -698,23 +861,20 @@ def fusion_rate_integral(
         / physics_data.temp_plasma_electron_vol_avg_kev
     ) * plasma_profile.teprofile.profile_y
 
-    # Number of fusion reactions per unit volume per particle volume density (m³/s)
-    sigv = bosch_hale_reactivity(ion_temperature_profile, reaction_constants)
-
-    # Integrand for the volume averaged fusion reaction rate sigmav:
-    # sigmav = integral(2 rho (sigv(rho) ni(rho)^2) drho),
-    # divided by the square of the volume-averaged ion density
-    # to retain the dimensions m^3/s (this is multiplied back in later)
-
     # Set each point in the density profile as a fraction of the volume averaged density
     density_profile_normalised = (
         1.0 / physics_data.nd_plasma_electrons_vol_avg
     ) * plasma_profile.neprofile.profile_y
 
-    # Calculate a volume averaged fusion reaction integral that allows for fusion power
-    # to be scaled with just the volume averaged ion density.
-    return (
-        2.0 * plasma_profile.teprofile.profile_x * sigv * density_profile_normalised**2
+    # Bosch–Hale parametric ⟨σv⟩(T); same numbers as before, via the shared
+    # profile weight so DT / DHe3 / DD and σ×f channels share one integrand.
+    return profile_reactivity_integrand(
+        plasma_profile.teprofile.profile_x,
+        ion_temperature_profile,
+        density_profile_normalised,
+        as_reactivity_model(
+            lambda t: bosch_hale_reactivity(t, reaction_constants)
+        ),
     )
 
 
@@ -789,6 +949,10 @@ def bosch_hale_reactivity(
     # if t = 0, sigmav = 0. Use this mask to set sigmav to zero.
     t_mask = ion_temperature_profile == 0.0  # noqa: RUF069
     sigmav[t_mask] = 0.0
+
+    # Outside the Bosch-Hale fit range (or with pathological profiles) xi/theta
+    # can become negative and produce NaN/Inf. Never propagate those.
+    sigmav = np.nan_to_num(sigmav, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Return np.ndarray of sigmav for each point in the ion temperature profile
     return sigmav
@@ -1595,3 +1759,125 @@ def _beam_fusion_cross_section(vrelsq: float) -> float:
     t1 = a2 / (1.0 + (a3 * e_beam_kev - a4) ** 2) + a5
     t2 = e_beam_kev * (np.exp(a1 / np.sqrt(e_beam_kev)) - 1.0)
     return 1.0e-24 * t1 / t2
+
+
+# =============================================================================
+# Proton - Boron-11 reactivity
+# =============================================================================
+#
+# p + 11B --> 3 alpha + 8.683 MeV
+#
+# Cross-section models live in :mod:`process.models.physics.p11b_cross_sections`
+# (plugin registry; default Wang et al. 2026). Unlike Bosch–Hale (closed-form
+# ⟨σv⟩ fits for DT/DHe3/DD), p–¹¹B uses the shared Maxwellian σ×f integrator
+# in :mod:`process.models.physics.reactivity`:
+#     <sigma v> = sqrt(8 kT / (pi mu)) * integral_0^inf sigma(x kT) x e^-x dx.
+#
+# Reactivity tables are cached per ``i_p11b_xsec_model`` on 0.5–3000 keV.
+
+_P11B_T_MIN_KEV = 0.5
+_P11B_T_MAX_KEV = 3000.0
+_P11B_TABLES: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+_P11B_T_CLIP_WARNED: set[int] = set()
+
+
+def p11b_s_factor(energy_mev, model=None):
+    """Astrophysical S-factor of p-11B [MeV b].
+
+    Parameters
+    ----------
+    energy_mev :
+        Centre-of-mass energy [MeV], scalar or array.
+    model :
+        ``i_p11b_xsec_model`` index, model key, or
+        :class:`~process.models.physics.p11b_cross_sections.P11BCrossSectionModel`.
+        Default = Wang 2026.
+
+    Returns
+    -------
+    :
+        S-factor [MeV b], zero outside the model's fitted energy range.
+    """
+    return get_p11b_cross_section_model(model).s_factor(energy_mev)
+
+
+def p11b_cross_section(energy_mev, model=None, *, warn_out_of_range: bool = True):
+    """p-11B fusion cross-section [m^2] for centre-of-mass energy in MeV."""
+    return get_p11b_cross_section_model(model).cross_section(
+        energy_mev, warn_out_of_range=warn_out_of_range
+    )
+
+
+def _p11b_reactivity_direct(t_kev, model=None):
+    """Maxwellian p-11B reactivity [m^3/s] via σ(E)×Maxwellian quadrature."""
+    xsec = get_p11b_cross_section_model(model)
+
+    def _sigma(energy_mev):
+        return xsec.cross_section(energy_mev, warn_out_of_range=False)
+
+    return maxwellian_reactivity(
+        t_kev, _sigma, xsec.reduced_mass_mev, n_quad=160
+    )
+
+
+def _p11b_reactivity_table(model=None):
+    """Build (and cache per model) the p-11B reactivity interpolation table."""
+    xsec = get_p11b_cross_section_model(model)
+    model_id = xsec.index
+    if model_id not in _P11B_TABLES:
+
+        def _sigma(energy_mev):
+            return xsec.cross_section(energy_mev, warn_out_of_range=False)
+
+        _P11B_TABLES[model_id] = tabulate_reactivity(
+            _sigma,
+            xsec.reduced_mass_mev,
+            _P11B_T_MIN_KEV,
+            _P11B_T_MAX_KEV,
+            n_points=400,
+            n_quad=160,
+        )
+    return _P11B_TABLES[model_id]
+
+
+def clear_p11b_reactivity_tables() -> None:
+    """Drop cached reactivity tables (for tests / model reloads)."""
+    _P11B_TABLES.clear()
+    _P11B_T_CLIP_WARNED.clear()
+
+
+def p11b_reactivity(t_kev, model=None):
+    """Maxwellian p-11B reactivity <sigma v> [m^3/s].
+
+    Uses the shared :func:`~process.models.physics.reactivity.maxwellian_reactivity`
+    integrator (velocity distribution × cross-section at given T), tabulated
+    per cross-section model for optimiser speed.
+
+    Parameters
+    ----------
+    t_kev :
+        Ion temperature [keV], scalar or array. Values outside the tabulated
+        0.5-3000 keV range are clipped (with a one-shot warning per model).
+    model :
+        ``i_p11b_xsec_model`` index / key / model instance. Default = Wang 2026.
+
+    Returns
+    -------
+    :
+        Reactivity [m^3/s].
+    """
+    xsec = get_p11b_cross_section_model(model)
+    temperatures, reactivities = _p11b_reactivity_table(xsec)
+    query = np.asarray(t_kev, dtype=float)
+    if np.any(query < temperatures[0]) or np.any(query > temperatures[-1]):
+        if xsec.index not in _P11B_T_CLIP_WARNED:
+            _P11B_T_CLIP_WARNED.add(xsec.index)
+            logger.warning(
+                "p-11B reactivity model %s (%s): ion temperature clipped to "
+                "[%.1f, %.1f] keV tabulated range.",
+                xsec.index,
+                xsec.key,
+                temperatures[0],
+                temperatures[-1],
+            )
+    return interpolate_reactivity_loglog(t_kev, temperatures, reactivities)

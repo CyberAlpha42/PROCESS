@@ -808,6 +808,28 @@ class Physics(Model):
             )
         )
 
+        # Sanitize P_sep BEFORE SOL / divertor / density-limit models (they use
+        # P_sep**negative powers). Old x/(1-exp(-x)) map turned large negative
+        # P_sep (P_rad >> P_heat, e.g. high-Te p-11B) into a tiny fake load;
+        # clamp non-positive / non-finite to 0, soft-map only small positives.
+        p_sep = self.data.physics.p_plasma_separatrix_mw
+        if not np.isfinite(p_sep):
+            logger.error(
+                "p_plasma_separatrix_mw is non-finite (%s); clamping to 0. "
+                "Check fusion/radiation power balance.",
+                p_sep,
+            )
+            self.data.physics.p_plasma_separatrix_mw = 0.0
+        elif p_sep < 0.0:
+            logger.warning(
+                "p_plasma_separatrix_mw is negative (%.6g MW); radiation exceeds "
+                "heating. Clamping to 0 (divertor / SOL metrics will be zero).",
+                p_sep,
+            )
+            self.data.physics.p_plasma_separatrix_mw = 0.0
+        else:
+            self.data.physics.p_plasma_separatrix_mw /= 1.0 - np.exp(-p_sep)
+
         self.data.physics.p_plasma_separatrix_rmajor_mw = (
             self.exhaust.calculate_psep_over_r_metric(
                 p_plasma_separatrix_mw=self.data.physics.p_plasma_separatrix_mw,
@@ -834,14 +856,6 @@ class Physics(Model):
         # ===============================
         self.data.physics.pflux_plasma_surface_neutron_avg_mw = (
             self.data.physics.p_neutron_total_mw / self.data.physics.a_plasma_surface
-        )
-
-        # KLUDGE: Ensure p_plasma_separatrix_mw is continuously positive
-        # (physical, rather than negative potential power),
-        # as required by other models (e.g.
-        # Physics.calculate_density_limit())
-        self.data.physics.p_plasma_separatrix_mw /= 1 - np.exp(
-            -self.data.physics.p_plasma_separatrix_mw
         )
 
         # if double null configuration share the power
@@ -1019,25 +1033,23 @@ class Physics(Model):
         # Journal of Nuclear Materials
         # Volumes 290-293, March 2001, Pages 935-939
         # Find the innner and outer lower target imbalance
-
-        self.data.physics.fio = 0.16e0 + (0.16e0 - 0.41e0) * (
-            1.0e0
-            - (
-                2.0e0
-                / (
-                    1.0e0
-                    + np.exp(
-                        -(
-                            (
-                                self.data.physics.drsep
-                                / self.data.physics.len_sol_outboard_power_decay
-                            )
-                            ** 2
+        lambda_q = self.data.physics.len_sol_outboard_power_decay
+        if (not np.isfinite(lambda_q)) or lambda_q <= 0.0:
+            # No SOL width (e.g. P_sep<=0): use asymptotic fio for |drsep/λ|→∞
+            self.data.physics.fio = 0.41e0
+        else:
+            self.data.physics.fio = 0.16e0 + (0.16e0 - 0.41e0) * (
+                1.0e0
+                - (
+                    2.0e0
+                    / (
+                        1.0e0
+                        + np.exp(
+                            -((self.data.physics.drsep / lambda_q) ** 2)
                         )
                     )
                 )
             )
-        )
         if self.data.divertor.n_divertors == 2:
             # Double Null configuration
             # Find all the power fractions accross the targets
@@ -1200,13 +1212,22 @@ class Physics(Model):
 
         # ======================================================================
 
+        # p/B as fuel fractions (f_plasma_fuel_*) vs legacy n_e-relative seeding
+        # (f_nd_*_electrons). Mutual exclusion is enforced in init.check_process.
+        use_pb_fuel_fractions = (
+            self.data.physics.f_plasma_fuel_protium > 0.0
+            or self.data.physics.f_plasma_fuel_boron11 > 0.0
+        )
+
         # Protons
+        # Fuel path: assigned from n_fuel after charge neutrality (no ash stack;
+        # D-³He proton ash << fuel inventory).
+        # Legacy path: Issue #557 seeded f_nd_protium_electrons (minimum ash).
         # This calculation will be wrong on the first call as the particle
-        # production rates are evaluated later in the calling sequence
-        # Issue #557 Allow f_nd_protium_electrons impurity to be specified:
-        # 'f_nd_protium_electrons'
-        # This will override the calculated value which is a minimum.
-        if self.data.physics.fusden_alpha_total < 1.0e-6:  # not calculated yet...
+        # production rates are evaluated later in the calling sequence.
+        if use_pb_fuel_fractions:
+            self.data.physics.nd_plasma_protons_vol_avg = 0.0
+        elif self.data.physics.fusden_alpha_total < 1.0e-6:  # not calculated yet...
             self.data.physics.nd_plasma_protons_vol_avg = max(
                 self.data.physics.f_nd_protium_electrons
                 * self.data.physics.nd_plasma_electrons_vol_avg,
@@ -1220,6 +1241,17 @@ class Physics(Model):
                 self.data.physics.nd_plasma_alphas_thermal_vol_avg
                 * self.data.physics.proton_rate_density
                 / self.data.physics.fusden_alpha_total,
+            )
+
+        # ======================================================================
+
+        # Boron-11: fuel path assigned after n_fuel; legacy = n_e-relative.
+        if use_pb_fuel_fractions:
+            self.data.physics.nd_plasma_boron11_vol_avg = 0.0
+        else:
+            self.data.physics.nd_plasma_boron11_vol_avg = (
+                self.data.physics.f_nd_boron11_electrons
+                * self.data.physics.nd_plasma_electrons_vol_avg
             )
 
         # ======================================================================
@@ -1254,32 +1286,49 @@ class Physics(Model):
 
         # ======================================================================
 
-        # Fuel portion - conserve charge neutrality
-        # znfuel is the sum of Zi.ni for the three fuel ions
-        znfuel = (
+        # Charge available for fuel ions (non-fuel species already subtracted).
+        # With f_p = f_B = 0 this is the legacy znfuel; n_fuel = q_avail / Z_bar
+        # then reduces to znfuel / (1 + f_He3).
+        q_avail = (
             self.data.physics.nd_plasma_electrons_vol_avg
             - 2.0 * self.data.physics.nd_plasma_alphas_thermal_vol_avg
             - self.data.physics.nd_plasma_protons_vol_avg
             - self.data.physics.nd_beam_ions
+            - 5.0 * self.data.physics.nd_plasma_boron11_vol_avg
             - znimp
         )
 
-        # Negative znfuel can occur during solution and is always fatal,
+        # Negative q_avail can occur during solution and is always fatal,
         # frequently resulting in a confusing bootstrap current error later.
         # Catch early and explicitly instead
-        if znfuel < 0.0:
-            raise ProcessValueError(f"znfuel is negative: {znfuel}")
+        if q_avail < 0.0:
+            raise ProcessValueError(
+                f"Charge available for fuel ions is negative (q_avail={q_avail}). "
+                "Reduce ash, impurities, beam or legacy p/B fractions."
+            )
 
-        # ======================================================================
-
-        # Fuel ion density, nd_plasma_fuel_ions_vol_avg
-        # For D-T-He3 mix, nd_plasma_fuel_ions_vol_avg = nD + nT + nHe3, while znfuel
-        # = nD + nT + 2*nHe3
-        # So nd_plasma_fuel_ions_vol_avg = znfuel - nHe3 = znfuel
-        # - f_plasma_fuel_helium3*nd_plasma_fuel_ions_vol_avg
-        self.data.physics.nd_plasma_fuel_ions_vol_avg = znfuel / (
-            1.0 + self.data.physics.f_plasma_fuel_helium3
+        # Mean fuel charge: Z_bar = Σ f_i Z_i over D, T, ³He, p, ¹¹B
+        z_bar_fuel = (
+            self.data.physics.f_plasma_fuel_deuterium
+            + self.data.physics.f_plasma_fuel_tritium
+            + 2.0 * self.data.physics.f_plasma_fuel_helium3
+            + self.data.physics.f_plasma_fuel_protium
+            + 5.0 * self.data.physics.f_plasma_fuel_boron11
         )
+
+        # Fuel ion density = sum of all fuel species densities
+        self.data.physics.nd_plasma_fuel_ions_vol_avg = q_avail / z_bar_fuel
+
+        # Assign p/B densities from fuel fractions when that path is active
+        if use_pb_fuel_fractions:
+            self.data.physics.nd_plasma_protons_vol_avg = (
+                self.data.physics.f_plasma_fuel_protium
+                * self.data.physics.nd_plasma_fuel_ions_vol_avg
+            )
+            self.data.physics.nd_plasma_boron11_vol_avg = (
+                self.data.physics.f_plasma_fuel_boron11
+                * self.data.physics.nd_plasma_fuel_ions_vol_avg
+            )
 
         # ======================================================================
 
@@ -1319,14 +1368,19 @@ class Physics(Model):
 
         # ======================================================================
 
-        # Total ion density
+        # Total ion density. When p/B are fuel fractions they are already in
+        # nd_plasma_fuel_ions_vol_avg; only add them separately on the legacy path.
         self.data.physics.nd_plasma_ions_total_vol_avg = (
             self.data.physics.nd_plasma_fuel_ions_vol_avg
             + self.data.physics.nd_plasma_alphas_thermal_vol_avg
-            + self.data.physics.nd_plasma_protons_vol_avg
             + self.data.physics.nd_beam_ions
             + self.data.physics.nd_plasma_impurities_vol_avg
         )
+        if not use_pb_fuel_fractions:
+            self.data.physics.nd_plasma_ions_total_vol_avg += (
+                self.data.physics.nd_plasma_protons_vol_avg
+                + self.data.physics.nd_plasma_boron11_vol_avg
+            )
 
         # ======================================================================
 
@@ -1367,6 +1421,12 @@ class Physics(Model):
                 ).squeeze()
                 ** 2
             )
+        # Boron-11 (Z = 5) contribution to Z_eff (works for fuel and legacy paths)
+        self.data.physics.n_charge_plasma_effective_vol_avg += (
+            25.0
+            * self.data.physics.nd_plasma_boron11_vol_avg
+            / self.data.physics.nd_plasma_electrons_vol_avg
+        )
 
         # ======================================================================
 
@@ -1395,11 +1455,13 @@ class Physics(Model):
 
         # ======================================================================
 
-        # Average atomic masses of injected fuel species
+        # Average atomic masses of injected fuel species (5 fuel ions)
         self.data.physics.m_fuel_amu = (
             (constants.M_DEUTERON_AMU * self.data.physics.f_plasma_fuel_deuterium)
             + (constants.M_TRITON_AMU * self.data.physics.f_plasma_fuel_tritium)
             + (constants.M_HELION_AMU * self.data.physics.f_plasma_fuel_helium3)
+            + (constants.M_PROTON_AMU * self.data.physics.f_plasma_fuel_protium)
+            + (constants.M_BORON11_AMU * self.data.physics.f_plasma_fuel_boron11)
         )
 
         # ======================================================================
@@ -1412,7 +1474,8 @@ class Physics(Model):
 
         # ======================================================================
 
-        # Average mass of all ions
+        # Average mass of all ions. p/B mass is in m_fuel_amu when they are fuel
+        # fractions; only add density fields separately on the legacy path.
         self.data.physics.m_ions_total_amu = (
             (
                 self.data.physics.m_fuel_amu
@@ -1422,9 +1485,15 @@ class Physics(Model):
                 constants.M_ALPHA_AMU
                 * self.data.physics.nd_plasma_alphas_thermal_vol_avg
             )
-            + (self.data.physics.nd_plasma_protons_vol_avg * constants.M_PROTON_AMU)
             + (self.data.physics.m_beam_amu * self.data.physics.nd_beam_ions)
         )
+        if not use_pb_fuel_fractions:
+            self.data.physics.m_ions_total_amu += (
+                self.data.physics.nd_plasma_protons_vol_avg * constants.M_PROTON_AMU
+            ) + (
+                self.data.physics.nd_plasma_boron11_vol_avg
+                * constants.M_BORON11_AMU
+            )
         for imp in range(N_IMPURITIES):
             if self.data.impurity_radiation.impurity_arr_z[imp] > 2:
                 self.data.physics.m_ions_total_amu += (
@@ -1464,6 +1533,11 @@ class Physics(Model):
                 / constants.M_ALPHA_AMU
             )
             + (self.data.physics.nd_plasma_protons_vol_avg / constants.M_PROTON_AMU)
+            + (
+                25.0
+                * self.data.physics.nd_plasma_boron11_vol_avg
+                / constants.M_BORON11_AMU
+            )
             + (
                 (1.0 - self.data.current_drive.f_beam_tritium)
                 * self.data.physics.nd_beam_ions
@@ -1575,10 +1649,13 @@ class Physics(Model):
         # pairs/m3
         # Remember that unburnt fuel-ion pairs/m3 = 0.5 * unburnt fuel-ions/m3
         if burnup_in <= 1.0e-9:
+            burnup_denominator = (
+                nd_plasma_alphas_thermal_vol_avg + 0.5 * nd_plasma_fuel_ions_vol_avg
+            )
             burnup = (
-                nd_plasma_alphas_thermal_vol_avg
-                / (nd_plasma_alphas_thermal_vol_avg + 0.5 * nd_plasma_fuel_ions_vol_avg)
-                / tauratio
+                0.0
+                if burnup_denominator == 0.0  # noqa: RUF069
+                else nd_plasma_alphas_thermal_vol_avg / burnup_denominator / tauratio
             )
         else:
             burnup = burnup_in
@@ -1587,9 +1664,16 @@ class Physics(Model):
         rndfuel = fusrat
 
         # Required fuelling rate (fuel ion pairs/second) (previously Amps)
-        molflow_plasma_fuelling_required = rndfuel / burnup
+        # Guard against zero burnup for aneutronic / non-D-T concepts
+        molflow_plasma_fuelling_required = (
+            0.0 if burnup == 0.0 else rndfuel / burnup  # noqa: RUF069
+        )
 
-        f_t_alpha_energy_confinement = t_alpha_confinement / t_energy_confinement
+        f_t_alpha_energy_confinement = (
+            0.0
+            if t_energy_confinement == 0.0  # noqa: RUF069
+            else t_alpha_confinement / t_energy_confinement
+        )
 
         return (
             burnup,
@@ -1865,6 +1949,18 @@ class Physics(Model):
             "(f_plasma_fuel_helium3)",
             self.data.physics.f_plasma_fuel_helium3,
         )
+        po.ovarre(
+            self.outfile,
+            "Protium fuel fraction",
+            "(f_plasma_fuel_protium)",
+            self.data.physics.f_plasma_fuel_protium,
+        )
+        po.ovarre(
+            self.outfile,
+            "Boron-11 fuel fraction",
+            "(f_plasma_fuel_boron11)",
+            self.data.physics.f_plasma_fuel_boron11,
+        )
         po.oblnkl(self.outfile)
         po.ocmmnt(self.outfile, "----------------------------")
         po.osubhd(self.outfile, "Fusion rates :")
@@ -1920,6 +2016,42 @@ class Physics(Model):
                 f"fusrat_plasma_dt_profile{i}",
                 self.data.physics.fusrat_plasma_dt_profile[i],
             )
+
+        po.ovarre(
+            self.mfile,
+            "p-11B fusion power (MW)",
+            "(p_plasma_p11b_mw)",
+            self.data.physics.pden_plasma_p11b_mw * self.data.physics.vol_plasma,
+            "OP ",
+        )
+        po.ovarre(
+            self.mfile,
+            "p-11B fusion power density (MW/m3)",
+            "(pden_plasma_p11b_mw)",
+            self.data.physics.pden_plasma_p11b_mw,
+            "OP ",
+        )
+        po.ovarre(
+            self.mfile,
+            "Boron-11 density (m-3)",
+            "(nd_plasma_boron11_vol_avg)",
+            self.data.physics.nd_plasma_boron11_vol_avg,
+            "OP ",
+        )
+        po.ovarre(
+            self.mfile,
+            "p-11B alpha production rate density (m-3 s-1)",
+            "(fusden_plasma_p11b_alpha)",
+            self.data.physics.fusden_plasma_p11b_alpha,
+            "OP ",
+        )
+        po.ovarre(
+            self.mfile,
+            "p-11B reaction rate density (m-3 s-1)",
+            "(fusden_plasma_p11b)",
+            self.data.physics.fusden_plasma_p11b,
+            "OP ",
+        )
 
         for i in range(len(self.data.physics.fusrat_plasma_dd_triton_profile)):
             po.ovarre(
@@ -2115,6 +2247,41 @@ class Physics(Model):
             "Total charged particle power (including alphas) (MW)",
             "(p_charged_particle_mw)",
             self.data.physics.p_charged_particle_mw,
+            "OP ",
+        )
+        po.ovarre(
+            self.outfile,
+            "p-11B fusion power (MW)",
+            "(p_plasma_p11b_mw)",
+            self.data.physics.pden_plasma_p11b_mw * self.data.physics.vol_plasma,
+            "OP ",
+        )
+        po.ovarre(
+            self.outfile,
+            "p-11B fusion power density (MW/m³)",
+            "(pden_plasma_p11b_mw)",
+            self.data.physics.pden_plasma_p11b_mw,
+            "OP ",
+        )
+        po.ovarre(
+            self.outfile,
+            "Boron-11 density (m⁻³)",
+            "(nd_plasma_boron11_vol_avg)",
+            self.data.physics.nd_plasma_boron11_vol_avg,
+            "OP ",
+        )
+        po.ovarre(
+            self.outfile,
+            "p-11B alpha production rate density (m⁻³ s⁻¹)",
+            "(fusden_plasma_p11b_alpha)",
+            self.data.physics.fusden_plasma_p11b_alpha,
+            "OP ",
+        )
+        po.ovarre(
+            self.outfile,
+            "p-11B reaction rate density (m⁻³ s⁻¹)",
+            "(fusden_plasma_p11b)",
+            self.data.physics.fusden_plasma_p11b,
             "OP ",
         )
         po.oblnkl(self.outfile)
