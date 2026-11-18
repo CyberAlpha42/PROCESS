@@ -644,7 +644,10 @@ class PhysicsData:
     """Plasma volume averaged electron density (⟨nₑ⟩) [/m³] (`iteration variable 6`)"""
 
     nd_plasma_fuel_ions_vol_avg: float = 0.0
-    """Plasma volume averaged fuel ion density (⟨n_fuel⟩) [/m³]"""
+    """Plasma volume averaged fuel ion density (⟨n_fuel⟩) [/m³].
+
+    Sum of all fuel ion densities: n_D + n_T + n_He3 + n_p + n_B11.
+    """
 
     dlamee: float = 0.0
     """electron-electron coulomb logarithm"""
@@ -696,6 +699,9 @@ class PhysicsData:
     nd_plasma_protons_vol_avg: float = 0.0
     """Plasma volume averaged proton ash density (⟨n_p⟩) [/m³]"""
 
+    nd_plasma_boron11_vol_avg: float = 0.0
+    """Plasma volume averaged boron-11 density (⟨n_B11⟩) [/m³]"""
+
     ntau: float = 0.0
     """Fusion double product [s/m³]"""
 
@@ -736,6 +742,12 @@ class PhysicsData:
 
     f_plasma_fuel_deuterium: float = 0.5
     """Plasma deuterium fuel fraction"""
+
+    f_plasma_fuel_protium: float = 0.0
+    """Plasma protium (proton) fuel fraction (p-11B fuel ion particle fraction)"""
+
+    f_plasma_fuel_boron11: float = 0.0
+    """Plasma boron-11 fuel fraction (p-11B fuel ion particle fraction)"""
 
     f_p_div_lower: float = 1.0
     """fraction of power to the lower divertor in double null configuration
@@ -791,6 +803,12 @@ class PhysicsData:
 
     fusden_plasma: float = 0.0
     """fusion reaction rate, just from plasma (reactions/m3/sec)"""
+
+    fusden_plasma_p11b: float = 0.0
+    """p-11B fusion reaction rate density (reactions/m3/sec)"""
+
+    fusden_plasma_p11b_alpha: float = 0.0
+    """p-11B alpha particle production rate density (alphas/m3/sec)"""
 
     f_c_plasma_non_inductive: float = 1.0
     """fraction of the plasma current produced by non-inductive means (`iteration variable 44`)"""
@@ -1099,6 +1117,9 @@ class PhysicsData:
     pden_non_alpha_charged_mw: float = 0.0
     """Non-alpha charged particle fusion power per volume [MW/m3]"""
 
+    pden_plasma_p11b_mw: float = 0.0
+    """Proton-boron-11 fusion power per volume [MW/m3]"""
+
     f_temp_plasma_electron_density_vol_avg: float = 0.0
     """Ratio of density weighted plasma electron tempertaurature to volume averaged (Profile Factor)"""
 
@@ -1310,7 +1331,11 @@ class PhysicsData:
     """Thermal alpha density/electron density (⟨n_αₜₕ⟩/⟨nₑ⟩)"""
 
     f_nd_protium_electrons: float = 0.0
-    """Seeded f_nd_protium_electrons density / electron density."""
+    """Legacy seeded protium density / electron density (ash / seeding path).
+
+    Mutually exclusive with f_plasma_fuel_protium / f_plasma_fuel_boron11.
+    Prefer the fuel-fraction inputs for p-11B fuel accounting.
+    """
 
     ind_plasma_internal_norm: float = 0.9
     """Plasma normalised internal inductance"""
@@ -1335,6 +1360,21 @@ class PhysicsData:
 
     f_nd_beam_electron: float = 0.005
     """hot beam density / n_e (`iteration variable 7`)"""
+
+    f_nd_boron11_electrons: float = 0.0
+    """Legacy boron-11 density / n_e (seeded / impurity-style path).
+
+    Mutually exclusive with f_plasma_fuel_protium / f_plasma_fuel_boron11.
+    Prefer the fuel-fraction inputs for p-11B fuel accounting.
+    """
+
+    i_p11b_xsec_model: int = 0
+    """p-11B cross-section / S-factor model selector.
+
+    0 = Wang et al. 2026 (default); 1 = Nevins & Swain 2000;
+    2 = Tentori & Belloni 2023; 3 = Sikora–Weller lower envelope (Tentori×0.9).
+    See ``process.models.physics.p11b_cross_sections``.
+    """
 
     f_nd_plasma_carbon_electron: float = 0.0
     """n_carbon / n_e"""

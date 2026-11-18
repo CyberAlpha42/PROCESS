@@ -125,6 +125,12 @@ Reference: National Institute of Standards and Technology (NIST)
 https://physics.nist.gov/cgi-bin/Compositions/stand_alone.pl?ele=Be
 """
 
+M_BORON11_AMU = 11.00930536
+"""Boron-11 atom (5B) mass [amu]
+Reference: National Institute of Standards and Technology (NIST)
+https://physics.nist.gov/cgi-bin/Compositions/stand_alone.pl?ele=B
+"""
+
 M_CARBON_AMU = 12.0096
 """Average Carbon atom mass [amu]
 Reference: National Institute of Standards and Technology (NIST)
@@ -265,6 +271,45 @@ DHELIUM_PROTON_ENERGY_FRACTION = ALPHA_MASS / (PROTON_MASS + ALPHA_MASS)
 Assuming centre of mass frame as the momenta of the fusion products exceed
 those of the fusion reagents by many orders of magnitude. Assumed to be non-relativistic.
 Roughly 79.889% of the energy is carried by the proton
+"""
+
+P_B11_ENERGY = 8.683e6 * 1.602176634e-19
+"""Proton - Boron-11 reaction energy [J]
+
+    p + 11B --> 3 alpha + 8.683 MeV
+
+The Q-value is taken from the evaluated nuclear data (8.683 MeV). Unlike D-T and
+D-3He, all of the reaction energy is carried by charged particles (three alpha
+particles), so there is no neutron power associated with this reaction.
+"""
+
+P_B11_ALPHA_COUNT = 3.0
+"""Number of alpha particles produced per p-11B reaction
+
+p + 11B --> 3 alpha. This is the p-11B analogue of the single alpha produced by
+D-T and D-3He, and is used to convert the reaction rate into an alpha
+production rate.
+"""
+
+P_B11_NEUTRON_ENERGY_FRACTION = 0.0
+"""Fraction of the p-11B reaction energy carried by neutrons
+
+The reaction is aneutronic, so no energy is carried by neutrons (compare with
+``DT_NEUTRON_ENERGY_FRACTION``).
+"""
+
+P_B11_ALPHA_ENERGY_FRACTION = 1.0 - P_B11_NEUTRON_ENERGY_FRACTION
+"""Fraction of the p-11B reaction energy carried by the alpha particles
+
+All of the 8.683 MeV is shared by three alphas (2.894 MeV each), i.e. the
+fraction is unity.
+"""
+
+P_B11_ALPHA_ENERGY = P_B11_ALPHA_ENERGY_FRACTION * P_B11_ENERGY / P_B11_ALPHA_COUNT
+"""Energy carried by each alpha particle from p-11B [J]
+
+Approximately 2.894 MeV per alpha. This is the p-11B analogue of
+``DT_ALPHA_ENERGY`` (3.5 MeV).
 """
 
 DEN_TUNGSTEN = 19250.0
