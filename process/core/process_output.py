@@ -40,10 +40,13 @@ class OutputFileManager:
         """Removes idempotence output files, closes the handler,
         and opens the main output files.
         """
-        Path(cls._outfile.name).unlink()
-        Path(cls._mfile.name).unlink()
+        # Windows cannot delete a file that is still open: close first, then unlink.
+        outfile_name = cls._outfile.name
+        mfile_name = cls._mfile.name
         cls._outfile.close()
         cls._mfile.close()
+        Path(outfile_name).unlink()
+        Path(mfile_name).unlink()
         cls.open_files(mode="a", output_prefix=output_prefix)
 
     @classmethod
