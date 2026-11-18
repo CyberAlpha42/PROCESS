@@ -1,6 +1,10 @@
 # Bosch-Hale Methods
 
-These methods are still kept in `physics_functions.py` but outside the [`FusionReactionRate`](plasma_reactions.md) class.
+These methods live in `fusion_reactions.py`, outside the [`FusionReactionRate`](plasma_reactions.md) class.
+They remain the **default ⟨σv⟩(T) backend** for D–T / D–³He / D–D. Reactions
+with structured cross-sections (p–¹¹B) instead use the Maxwellian σ×f
+integrator in `process.models.physics.reactivity`; both backends share the
+profile weight via `profile_reactivity_integrand`.
 
 ## Bosch-Hale Constants | `BoschHaleConstants`
 

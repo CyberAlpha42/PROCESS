@@ -62,7 +62,10 @@ It is also possible to optimise on the deuterium-tritium fuel mixture ratio. For
 
 !!! note "Reactions not calculated"
 
-    `PROCESS` at the moment does not do calculations for the core reactions of $\text{T-T}$,  $\text{T-}^3\text{He}$,  $^3$$\text{He}$ $-^3$$\text{He}$ and $\text{p}$ -$^{11}$$\text{B}$.
+    `PROCESS` at the moment does not do calculations for the core reactions of $\text{T-T}$,  $\text{T-}^3\text{He}$ and  $^3$$\text{He}$ $-^3$$\text{He}$.
+
+    p-¹¹B is available as a separate reaction channel; see the
+    [proton–boron-11 page](p11b_reactions.md) for the model and its inputs.
 
     Fusion reactions involving fusion products such as $\text{n}$, $\text{p}$ and $\alpha$ are also not calculated.
 
